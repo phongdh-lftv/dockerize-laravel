@@ -1,0 +1,125 @@
+#################################################
+# base-php-builder
+FROM php:8.2-fpm-alpine as base-php-builder
+
+# Install default libraries
+RUN apk upgrade --update \
+    && apk add --no-cache \
+       supervisor \
+       git autoconf build-base openssl-dev \
+       libzip-dev libssh2 libsodium libzip zlib-dev \
+       libmcrypt-dev libxml2 libxml2-dev \
+    && docker-php-ext-configure zip \
+    && docker-php-ext-install zip pdo_mysql soap bcmath pcntl opcache \
+    && rm -rf /tmp/*
+
+# Install GD extension
+RUN docker-php-source extract \
+    && apk add --no-cache \
+      freetype freetype-dev \
+      libjpeg-turbo libjpeg-turbo-dev \
+      libpng libpng-dev \
+      libwebp libwebp-dev \
+    && docker-php-ext-configure gd --enable-gd --with-freetype --with-jpeg --with-webp \
+    && docker-php-ext-configure opcache --enable-opcache \
+    && docker-php-ext-install gd \
+    && docker-php-source delete \
+    && rm -rf /tmp/*
+
+# Install mbstring extension
+RUN docker-php-source extract \
+    && apk add --no-cache oniguruma-dev \
+    && docker-php-ext-install mbstring \
+    && docker-php-ext-enable mbstring \
+    && docker-php-source delete \
+    && rm -rf /tmp/*
+
+# Install redis
+RUN docker-php-source extract \
+    && pecl install redis \
+    && docker-php-ext-enable redis \
+    && docker-php-source delete \
+    && rm -rf /tmp/*
+
+# install composer
+RUN php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');" && \
+    php composer-setup.php --install-dir=/usr/local/bin --filename=composer && \
+    php -r "unlink('composer-setup.php');"
+ENV COMPOSER_ALLOW_SUPERUSER 1
+
+# copy src to workdir
+RUN mkdir /var/www/app
+COPY ./src /var/www/app
+WORKDIR /var/www/app
+# set permission
+RUN chmod -R 777 storage
+RUN chmod -R 777 bootstrap
+
+# configuration app
+# php.ini
+COPY ./docker/app/config/php/php.ini /usr/local/etc/php/php.ini
+# workers
+ADD ./docker/workers/laravel-worker.conf /etc/supervisor/conf.d/laravel-worker.conf
+ADD ./docker/workers/php-fpm.conf /etc/supervisor/conf.d/php-fpm.conf
+ADD ./docker/workers/supervisord.conf /etc/supervisor/supervisord.conf
+RUN mkdir /var/log/supervisor
+# composer install packages
+RUN composer install --no-dev
+#################################################
+
+#################################################
+# Build assets
+#################################################
+FROM node:lts-slim as npm-builder
+
+WORKDIR /var/www/html
+COPY ./src .
+
+RUN npm install && \
+    npm run build
+RUN rm -rf ./node_modules
+#################################################
+
+#################################################
+# php fpm
+#################################################
+# for development
+# - need some development tools
+# - nodejs & npm
+FROM base-php-builder as php-fpm-development
+
+# install xdebug
+RUN apk add --update linux-headers
+RUN docker-php-source extract \
+    && pecl install xdebug \
+    && echo "xdebug.remote_enable=on\n" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
+    && echo "xdebug.remote_autostart=on\n" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
+    && echo "xdebug.remote_port=9000\n" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
+    && echo "xdebug.remote_handler=dbgp\n" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
+    && echo "xdebug.remote_connect_back=1\n" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
+    && docker-php-ext-enable xdebug \
+    && docker-php-source delete \
+    && rm -rf /tmp/*
+
+# install nodejs & npm
+RUN apk add --update nodejs npm
+
+# install packages
+WORKDIR /var/www/app
+RUN npm install && npm run build
+
+EXPOSE 9000
+
+# for production
+# - no need development tools
+FROM base-php-builder as php-fpm-production
+COPY --from=npm-builder /var/www/html/public /var/www/app/public
+EXPOSE 9000
+#################################################
+
+#################################################
+# nginx
+FROM nginx:stable-alpine as nginx
+COPY ./docker/nginx/app-site.conf /etc/nginx/nginx.conf
+EXPOSE 80
+#################################################

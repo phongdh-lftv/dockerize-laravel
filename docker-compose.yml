@@ -1,0 +1,89 @@
+version: '3'
+services:
+  nginx:
+    image: '${APP_NAME}/nginx:latest'
+    container_name: '${APP_NAME}-nginx'
+    volumes:
+      - './src/public:/var/www/app/public'
+    networks:
+      - www
+    ports:
+      - '${APP_PORT:-8000}:80'
+    expose:
+      - '80'
+    links:
+      - 'app'
+    depends_on:
+      - 'app'
+  app:
+    image: '${APP_NAME}/php-fpm-${APP_ENV}:latest'
+    container_name: '${APP_NAME}-app'
+    environment:
+      - TZ=${APP_TIMEZONE:-UTC}
+      - APP_NAME=${APP_NAME}
+      - APP_ENV=${APP_ENV}
+      - APP_URL=${APP_URL}
+      - DB_HOST=${DB_HOST}
+      - DB_DATABASE=${DB_DATABASE}
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+      - AWS_USE_PATH_STYLE_ENDPOINT=${AWS_USE_PATH_STYLE_ENDPOINT}
+    volumes:
+      - './src:/var/www/app'
+      - 'vendor:/var/www/app/vendor'
+      - 'node_modules:/var/www/app/node_modules'
+      - './docker/app/entrypoint.sh:/entrypoint.sh'
+    working_dir: '/var/www/app'
+    command: ['sh', '/entrypoint.sh']
+    networks:
+      - www
+    depends_on:
+      - 'mysql'
+      - 'redis'
+  mysql:
+    build:
+      context: './docker/mysql'
+      dockerfile: 'Dockerfile'
+    container_name: '${APP_NAME}-mysql'
+    volumes:
+      - './docker/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql'
+      - 'mysql:/var/lib/mysql'
+    networks:
+      - www
+    environment:
+      TZ: ${APP_TIMEZONE:-UTC}
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+      MYSQL_DATABASE: ${DB_DATABASE}
+      MYSQL_USER: ${DB_USERNAME}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+    ports:
+      - '${DB_FORWARD_PORT:-13306}:3306'
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-p${DB_PASSWORD}']
+  redis:
+    image: 'redis:alpine'
+    container_name: '${APP_NAME}-redis'
+    ports:
+      - '${REDIS_FORWARD_PORT:-16379}:6379'
+    volumes:
+      - 'redis:/data'
+    networks:
+      - www
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      retries: 3
+      timeout: 5s
+networks:
+  www:
+    driver: bridge
+volumes:
+  mysql:
+    driver: local
+  redis:
+    driver: local
+  vendor:
+  node_modules:
